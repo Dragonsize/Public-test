@@ -1,2 +1,309 @@
-# Public-test
-Out
+// ==UserScript==
+// @name         Elearn solver (Clean Logs + Summary)
+// @namespace    moodle.ai.solver.flash2.clean.summary
+// @version      4.8
+// @description  Uses Gemini 2.0 Flash Lite. Logs Answer and Confidence on separate lines.
+// @match        https://elearning.tdtu.edu.vn/mod/quiz/*
+// @connect      generativelanguage.googleapis.com
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const MODEL_ID = "gemini-2.0-flash-lite";
+    const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent`;
+
+    function addUI() {
+        if (document.getElementById('aiSolverBox')) return;
+
+        // --- Main Box ---
+        const box = document.createElement('div');
+        box.id = 'aiSolverBox';
+
+        Object.assign(box.style, {
+            position: 'fixed', top: '60px', left: 'auto', right: '20px',
+            zIndex: '99999',
+            background: '#1e1e1e',
+            border: '2px solid #7c4dff',
+            borderRadius: '12px',
+            width: '320px',
+            color: '#e0e0e0',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
+            display: 'flex', flexDirection: 'column', overflow: 'hidden'
+        });
+
+        // --- Header ---
+        const header = document.createElement('div');
+        Object.assign(header.style, {
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '10px 15px', background: '#252525', borderBottom: '1px solid #333',
+            cursor: 'move', userSelect: 'none'
+        });
+
+        header.innerHTML = `
+            <h4 style="margin:0; color:#b388ff; font-family:Segoe UI;">
+                👾 AI Solver <span style="font-size:0.8em; opacity:0.7">v4.8</span>
+            </h4>
+            <div style="display:flex; gap:10px;">
+                <span id="aiMinBtn" style="cursor:pointer; color:#bbb;">_</span>
+                <span id="aiCloseBtn" style="cursor:pointer; color:#bbb;">✖</span>
+            </div>
+        `;
+        box.appendChild(header);
+
+        // --- Content ---
+        const contentDiv = document.createElement('div');
+        contentDiv.style.padding = '15px';
+
+        const keyInput = document.createElement('input');
+        keyInput.type = 'password';
+        keyInput.placeholder = 'Paste Gemini API Key';
+        keyInput.value = GM_getValue('gemini_api_key', '');
+        Object.assign(keyInput.style, {
+            width: '100%', padding: '10px', marginBottom: '15px',
+            background: '#2d2d2d', border: '1px solid #444',
+            color: '#fff', borderRadius: '6px', outline: 'none'
+        });
+        keyInput.addEventListener('change', () => GM_setValue('gemini_api_key', keyInput.value.trim()));
+        contentDiv.appendChild(keyInput);
+
+        // Buttons
+        const btnContainer = document.createElement('div');
+        Object.assign(btnContainer.style, { display: 'flex', gap: '10px' });
+
+        const solveBtn = document.createElement('button');
+        solveBtn.textContent = '⚡ SOLVE ALL';
+        Object.assign(solveBtn.style, {
+            flex: '2', padding: '10px', background: 'linear-gradient(135deg, #6200ea, #7c4dff)',
+            color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold'
+        });
+
+        const checkBtn = document.createElement('button');
+        checkBtn.textContent = '📡 TEST';
+        Object.assign(checkBtn.style, {
+            flex: '1', padding: '10px', background: '#424242',
+            color: '#e0e0e0', border: '1px solid #555', borderRadius: '6px', cursor: 'pointer'
+        });
+
+        btnContainer.appendChild(solveBtn);
+        btnContainer.appendChild(checkBtn);
+        contentDiv.appendChild(btnContainer);
+
+        // Log Area
+        const logArea = document.createElement('div');
+        Object.assign(logArea.style, {
+            marginTop: '15px', height: '200px', overflowY: 'auto',
+            background: '#121212', border: '1px solid #333',
+            fontSize: '12px', padding: '10px', borderRadius: '6px',
+            color: '#bbb', fontFamily: 'Consolas, monospace'
+        });
+        logArea.id = 'aiLogArea';
+        contentDiv.appendChild(logArea);
+        box.appendChild(contentDiv);
+
+        // --- Icon ---
+        const iconWrapper = document.createElement('div');
+        iconWrapper.id = 'aiIconWrapper';
+        Object.assign(iconWrapper.style, {
+            display: 'none', width: '100%', height: '100%',
+            justifyContent: 'center', alignItems: 'center', cursor: 'pointer',
+            background: '#1e1e1e', borderRadius: '50%'
+        });
+        iconWrapper.innerHTML = `<div style="font-size:24px;">👾</div>`;
+        box.appendChild(iconWrapper);
+
+        document.body.appendChild(box);
+
+        // --- Logic ---
+        solveBtn.onclick = async () => {
+            const apiKey = keyInput.value.trim();
+            if (!apiKey) return log(' Error: No API Key provided.', '#ff5252');
+            await runSolver(apiKey);
+        };
+        checkBtn.onclick = async () => {
+            const apiKey = keyInput.value.trim();
+            if (!apiKey) return log(' Error: No API Key provided.', '#ff5252');
+            await checkApiStatus(apiKey);
+        };
+
+        // Window Controls
+        header.querySelector('#aiCloseBtn').onclick = () => box.remove();
+        const minBtn = header.querySelector('#aiMinBtn');
+        const toggleMin = (min) => {
+            contentDiv.style.display = min ? 'none' : 'block';
+            header.style.display = min ? 'none' : 'flex';
+            iconWrapper.style.display = min ? 'flex' : 'none';
+            box.style.width = min ? '50px' : '320px';
+            box.style.height = min ? '50px' : 'auto';
+            box.style.borderRadius = min ? '50%' : '12px';
+            box.style.border = min ? '2px solid #b388ff' : '2px solid #7c4dff';
+        };
+        minBtn.onclick = () => toggleMin(true);
+        iconWrapper.onclick = () => toggleMin(false);
+        makeDraggable(box, header);
+        makeDraggable(box, iconWrapper);
+    }
+
+    function makeDraggable(element, handle) {
+        let pos1=0, pos2=0, pos3=0, pos4=0;
+        handle.onmousedown = (e) => {
+            e.preventDefault();
+            const rect = element.getBoundingClientRect();
+            element.style.left = rect.left + "px"; element.style.top = rect.top + "px"; element.style.right = "auto";
+            pos3 = e.clientX; pos4 = e.clientY;
+            document.onmouseup = () => { document.onmouseup = null; document.onmousemove = null; };
+            document.onmousemove = (e) => {
+                e.preventDefault();
+                pos1 = pos3 - e.clientX; pos2 = pos4 - e.clientY;
+                pos3 = e.clientX; pos4 = e.clientY;
+                element.style.top = (element.offsetTop - pos2) + "px";
+                element.style.left = (element.offsetLeft - pos1) + "px";
+            };
+        };
+    }
+
+    function log(msg, color = '#e0e0e0', isBold = false) {
+        const area = document.getElementById('aiLogArea');
+        if(area) {
+            const line = document.createElement('div');
+            line.style.marginBottom = '6px'; line.style.borderBottom = '1px solid #222'; line.style.paddingBottom = '4px';
+            line.style.color = color; if (isBold) line.style.fontWeight = 'bold';
+            line.innerHTML = msg;
+            area.appendChild(line); area.scrollTop = area.scrollHeight;
+        }
+        console.log('[AI Solver]', msg.replace(/<[^>]*>?/gm, ''));
+    }
+
+    function checkApiStatus(apiKey) {
+        log('📡 Ping Gemini...', '#b388ff');
+        GM_xmlhttpRequest({
+            method: "POST", url: `${API_URL}?key=${apiKey}`,
+            headers: { "Content-Type": "application/json" },
+            data: JSON.stringify({ contents: [{ parts: [{ text: "Reply with 'OK'" }] }] }),
+            onload: function(res) {
+                if (res.status === 200) log('✅ API is Ready!', '#00e676', true);
+                else if (res.status === 429) log('⏳ Rate Limited.', '#ffab40', true);
+                else log(`❌ Error: ${res.status}`, '#ff5252');
+            },
+            onerror: function() { log('❌ Network Error', '#ff5252'); }
+        });
+    }
+
+    async function runSolver(apiKey) {
+        log(`Starting...`, '#b388ff');
+        const questions = document.querySelectorAll('.que.multichoice');
+        log(`Found ${questions.length} questions.`, '#b388ff');
+        if (questions.length === 0) return log(' No questions found.', '#ff5252');
+
+        let solved = 0;
+        let flaggedQuestions = []; // To store low confidence Qs
+
+        for (let i = 0; i < questions.length; i++) {
+            const qBlock = questions[i];
+            const qTextElem = qBlock.querySelector('.qtext');
+            if (!qTextElem) continue;
+
+            const qText = qTextElem.innerText.trim();
+            const optionRows = qBlock.querySelectorAll('.answer div[class^="r"]');
+            let optionsText = [], radioInputs = [];
+
+            optionRows.forEach(row => {
+                const label = row.querySelector('label');
+                const input = row.querySelector('input[type="radio"]');
+                if (label && input) {
+                    optionsText.push(label.innerText.replace(/^[a-z]\.\s*/i, '').trim());
+                    radioInputs.push(input);
+                }
+            });
+
+            if (optionsText.length === 0) continue;
+
+            qBlock.style.transition = "border 0.3s";
+            qBlock.style.borderLeft = "5px solid #7c4dff";
+            qBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            try {
+                const result = await callGeminiWithRetry(apiKey, qText, optionsText);
+
+                if (result && result.index !== null && result.index >= 0 && result.index < radioInputs.length) {
+                    radioInputs[result.index].click();
+
+                    let confColor = '#00e676';
+                    if (result.confidence < 50) { confColor = '#ff5252'; flaggedQuestions.push(`Q${i+1}`); }
+                    else if (result.confidence < 80) { confColor = '#ffab40'; flaggedQuestions.push(`Q${i+1}`); }
+
+                    qBlock.style.borderLeft = `5px solid ${confColor}`;
+
+                    const displayQ = qText.length > 100 ? qText.substring(0, 97) + "..." : qText;
+                    log(` Q${i+1}: ${displayQ}`, '#40c4ff', true);
+
+                    // 1. Log Answer (Clean)
+                    log(`=> ${optionsText[result.index]}`, '#e0e0e0');
+                    // 2. Log Confidence (New Line)
+                    log(`<span style="font-size:0.9em; opacity:0.8;">(Confidence: ${result.confidence}%)</span>`, confColor);
+
+                    solved++;
+                } else {
+                    qBlock.style.borderLeft = "5px solid #ff5252";
+                    log(`❌ Q${i+1}: Uncertain.`, '#ff5252');
+                }
+            } catch (err) {
+                qBlock.style.borderLeft = "5px solid #ff5252";
+                log(`❌ Q${i+1}: ${err.message}`, '#ff5252');
+            }
+            await new Promise(r => setTimeout(r, 1000));
+        }
+
+        log(`🏁 DONE. Solved ${solved}/${questions.length}`, '#b388ff');
+
+        // Summary at the end
+        if (flaggedQuestions.length > 0) {
+            log(`⚠️ Check these: ${flaggedQuestions.join(', ')}`, '#ffab40', true);
+        }
+    }
+
+    async function callGeminiWithRetry(apiKey, question, options) {
+        let attempts = 0;
+        while (attempts < 3) {
+            try {
+                return await callGemini(apiKey, question, options);
+            } catch (error) {
+                if (error.message.includes("429")) {
+                    attempts++;
+                    log(`Rate Limit. Pausing 5s...`, '#ffab40');
+                    await new Promise(r => setTimeout(r, 5000));
+                } else throw error;
+            }
+        }
+        throw new Error("Failed after 3 retries");
+    }
+
+    function callGemini(apiKey, question, options) {
+        return new Promise((resolve, reject) => {
+            const prompt = `Question: ${question}\nOptions:\n${options.map((o,i)=>`${i}. ${o}`).join('\n')}\nTask: Identify correct answer & confidence (0-100).\nOutput: "INDEX|CONFIDENCE" (e.g. 2|95).`;
+            GM_xmlhttpRequest({
+                method: "POST", url: `${API_URL}?key=${apiKey}`,
+                headers: { "Content-Type": "application/json" },
+                data: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+                onload: function(res) {
+                    if (res.status === 429) return reject(new Error("429"));
+                    if (res.status !== 200) return reject(new Error(`API Error ${res.status}`));
+                    try {
+                        const text = JSON.parse(res.responseText).candidates[0].content.parts[0].text.trim();
+                        const parts = text.split('|');
+                        if (parts.length === 2) resolve({ index: parseInt(parts[0]), confidence: parseInt(parts[1]) });
+                        else resolve({ index: parseInt(text.match(/\d+/)[0]), confidence: 0 });
+                    } catch (e) { reject(new Error("Parse Error")); }
+                },
+                onerror: () => reject(new Error("Network Error"))
+            });
+        });
+    }
+
+    window.addEventListener('keydown', e => {
+        if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'f') addUI();
+    });
+})();
